@@ -4,7 +4,7 @@
 
 You need to install [Pipenv](https://docs.pipenv.org/en/latest/) to run the script:
 
-`pip install --user pipen`
+`pip install --user pipenv`
 
 
 ## Running

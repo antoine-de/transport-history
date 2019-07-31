@@ -82,7 +82,10 @@ def _resource_title(resource):
     )
 
 
-def _download_resource(resource) -> str:
+def _download_resource(resource) -> (str, str):
+    # we create the working dir
+    WORKING_DIR.mkdir(parents=True, exist_ok=True)
+
     resource_response = requests.get(resource["metadata"]["url"], allow_redirects=True)
     now = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
     file_name = f"{_resource_title(resource)}_{now}"
