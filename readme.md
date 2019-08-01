@@ -1,5 +1,10 @@
 # Script to backup all transport.data.gouv.fr resources to s3
 
+This script query the transport.data.gouv.fr's api, and for all datasets:
+* create a bucket (named `dataset_{datagouv_id}`)
+* for all resource, check if there is a resource with the same name that have been updated since last backup
+* if it's the case upload the ressource and also add the resource metadata to s3
+
 ## Install
 
 You need to install [Pipenv](https://docs.pipenv.org/en/latest/) to run the script:

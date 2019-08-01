@@ -6,6 +6,8 @@ import dateutil
 import logging
 from pathlib import Path
 import datetime
+from typing import Tuple
+import unidecode
 
 logging.basicConfig(level=logging.INFO)
 
@@ -34,8 +36,6 @@ def _get_all_ressources():
             if not url:
                 continue
 
-            # headers = _get_ressource_headers(url)
-            # yield {"dataset": d, "metadata": r, "headers": headers}
             yield {"dataset": d, "metadata": r}
 
 
@@ -63,18 +63,18 @@ def _needs_to_be_updated(resource, dataset_bucket):
     return True
 
 
-def _needs_to_be_backuped(resource):
+def _needs_to_be_backuped(resource) -> bool:
     # for the moment we only backup the public transit
-    fmt = resource["metadata"].get("format")
+    fmt = resource["metadata"].get("format").lower()
     t = resource["dataset"].get("type")
-    return t == "public-transit" and fmt in ("GTFS", "NETEX")
+    return t == "public-transit" and fmt in ("gtfs", "netex")
 
 
-def _debug_name(resource):
+def _debug_name(resource) -> str:
     return f'{resource["dataset"]["title"]} - {resource["metadata"]["title"]}'
 
 
-def _resource_title(resource):
+def _resource_title(resource) -> str:
     return (
         f'{resource["metadata"]["title"]}'.replace(" ", "_")
         .replace("/", "_")
@@ -82,7 +82,7 @@ def _resource_title(resource):
     )
 
 
-def _download_resource(resource) -> (str, str):
+def _download_resource(resource) -> Tuple[Path, str]:
     # we create the working dir
     WORKING_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -98,6 +98,17 @@ def _backup(resource, dataset_bucket):
     logging.info(
         f"backuping {_debug_name(resource)} (modified {resource['metadata']['updated']}"
     )
+    # we use only ascii character for the title as cellar can be a tad strict
+    title = unidecode.unidecode(_resource_title(resource))
+
+    metadata = {
+        "url": resource["metadata"]["url"],
+        "title": title,
+        "start": resource["metadata"]["start_calendar_validity"],
+        "end": resource["metadata"]["end_calendar_validity"],
+        "format": resource["metadata"]["format"],
+    }
+    metadata = {k: v for (k, v) in metadata.items() if v is not None}
 
     # we download the file
     file_path, file_name = _download_resource(resource)
@@ -105,13 +116,13 @@ def _backup(resource, dataset_bucket):
     dataset_bucket.upload_file(
         Filename=str(file_path.resolve()),
         Key=file_name,
-        ExtraArgs={"Metadata": {"url": resource["metadata"]["url"]}},
+        ExtraArgs={"Metadata": metadata, "ACL": "public-read"},
     )
 
-    for o in _get_already_backuped_resources(resource, dataset_bucket):
-        logging.info(
-            f"resources in dataset bucket: {o.key} ({o.last_modified} -- size = {o.size} -- etag = {o.e_tag})"
-        )
+    # for o in _get_already_backuped_resources(resource, dataset_bucket):
+    #     logging.info(
+    #         f"resources in dataset bucket: {o.key} ({o.last_modified} -- size = {o.size} -- etag = {o.e_tag})"
+    #     )
 
     # we remove the file afterward
     file_path.unlink()
@@ -183,6 +194,5 @@ def list_resources(ctx, api_key, secret_key=None):
 
         for o in b.objects.all():
             logging.info(
-                f"  - {o.key} ({o.last_modified} -- size = {o.size} -- etag = {o.e_tag})"
+                f"  - {o.key} ({o.last_modified} -- size = {o.size} -- etag = {o.e_tag}) -- metadata = {o.Object().metadata})"
             )
-
