@@ -10,6 +10,7 @@ invoke = "*"
 requests = "*"
 boto3 = "*"
 python-dateutil = "*"
+unidecode = "*"
 
 [requires]
 python_version = "3.7"
