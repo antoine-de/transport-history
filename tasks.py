@@ -196,3 +196,30 @@ def list_resources(ctx, api_key, secret_key=None):
             logging.info(
                 f"  - {o.key} ({o.last_modified} -- size = {o.size} -- etag = {o.e_tag}) -- metadata = {o.Object().metadata})"
             )
+
+@task()
+def delete_all_resources(ctx, api_key, secret_key=None):
+    """
+    List all backuped ressources
+    """
+    s3_client = _make_s3_client(api_key, secret_key)
+
+    for b in s3_client.buckets.all():
+        logging.info(f"* bucket {b.name}")
+
+        for o in b.objects.all():
+            logging.info(
+                f"  - {o.key} ({o.last_modified} -- size = {o.size} -- etag = {o.e_tag}) -- metadata = {o.Object().metadata})"
+            )
+            o.delete()
+        b.delete()
+
+@task()
+def delete_one_resources(ctx, api_key, secret_key, bucket, obj_key):
+    """
+    List all backuped ressources
+    """
+    s3_client = _make_s3_client(api_key, secret_key)
+
+    o = s3_client.Object(bucket, obj_key)
+    o.delete()
