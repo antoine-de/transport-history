@@ -8,6 +8,7 @@ from pathlib import Path
 import datetime
 from typing import Tuple
 import unidecode
+import collections
 
 logging.basicConfig(level=logging.INFO)
 
@@ -144,6 +145,30 @@ def _make_s3_client(api_key, secret_key):
     )
 
 
+@task()
+def check_etag(ctx):
+    """
+    backup all transport.data.gouv.fr resources to s3
+
+    Only resources that have changed are backuped
+    """
+    nb_resources = nb_resources_etag = 0
+    for r in _get_all_ressources():
+        if not _needs_to_be_backuped(r):
+            continue
+        nb_resources += 1
+        url = r["metadata"]["url"]
+        headers = _get_ressource_headers(url)
+
+        logging.info(f"-- {_debug_name(r)}")
+        etag = headers.get("ETag")
+        if etag is not None:
+            logging.info(etag)
+            nb_resources_etag += 1
+
+    logging.info(f"{nb_resources_etag} / {nb_resources} with etag")
+
+
 @task(default=True)
 def backup_resources(ctx, api_key, secret_key=None):
     """
@@ -197,6 +222,7 @@ def list_resources(ctx, api_key, secret_key=None):
                 f"  - {o.key} ({o.last_modified} -- size = {o.size} -- etag = {o.e_tag}) -- metadata = {o.Object().metadata})"
             )
 
+
 @task()
 def delete_all_resources(ctx, api_key, secret_key=None):
     """
@@ -213,6 +239,38 @@ def delete_all_resources(ctx, api_key, secret_key=None):
             )
             o.delete()
         b.delete()
+
+
+@task()
+def delete_duplicates(ctx, api_key, secret_key=None):
+    """
+    delete duplicates (usefull if new object with more metadata have been added)
+    """
+    s3_client = _make_s3_client(api_key, secret_key)
+
+    for b in s3_client.buckets.all():
+        logging.info(f"* bucket {b.name}")
+
+        duplicates = collections.defaultdict(list)
+        for o in b.objects.all():
+            duplicate_key = (
+                o.Object().metadata["title"],
+                o.Object().metadata.get("content-hash"),
+            )
+
+            duplicates[duplicate_key].append(o)
+
+        for k, v in duplicates.items():
+            if len(v) <= 1:
+                continue
+
+            last_modified = max(v, key=lambda o: o.last_modified)
+            logging.info(f"duplicate for {k}, last_modified: {last_modified}")
+            for o in v:
+                if o != last_modified:
+                    logging.info(f"delete old duplicate: {o}")
+                    o.delete()
+
 
 @task()
 def delete_one_resources(ctx, api_key, secret_key, bucket, obj_key):
