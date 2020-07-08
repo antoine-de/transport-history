@@ -1,7 +1,5 @@
 from invoke import task
 import requests
-import boto3
-import botocore
 import dateutil
 import logging
 from pathlib import Path
@@ -9,21 +7,17 @@ import datetime
 from typing import Tuple
 import unidecode
 import collections
+import arrow
+import zipfile
 
 logging.basicConfig(level=logging.INFO)
 
 WORKING_DIR = Path("./tmp")
-CELLAR_URL = "https://cellar-c2.services.clever-cloud.com"
 
 
-def _get_ressource_headers(ressource_url):
-    head = requests.head(ressource_url)
-    location = head.headers.get("location")
-    if location:
-        # we query the other location
-        head = requests.head(location)
-
-    return head.headers
+def _get_all_datasets():
+    r = requests.get("http://localhost:5000/api/datasets")
+    return r.json()
 
 
 def _get_all_ressources():
@@ -40,39 +34,8 @@ def _get_all_ressources():
             yield {"dataset": d, "metadata": r}
 
 
-def _get_already_backuped_resources(resource, dataset_bucket):
-    return dataset_bucket.objects.filter(Prefix=_resource_title(resource))
-
-
-def _needs_to_be_updated(resource, dataset_bucket):
-    # we list all resources of the bucket to find if the resource is already at its latest version
-    objs = _get_already_backuped_resources(resource, dataset_bucket)
-
-    max_last_modified = max((o.last_modified for o in objs), default=None)
-
-    if max_last_modified:
-        resource_modification_date = dateutil.parser.parse(
-            resource["metadata"]["updated"]
-        )
-        if max_last_modified >= resource_modification_date:
-            logging.debug(
-                f"resource is already backuped ({resource_modification_date} < {max_last_modified})"
-            )
-            return False
-
-    # TODO: ETag, Last-Modified, md5sum ?
-    return True
-
-
-def _needs_to_be_backuped(resource) -> bool:
-    # for the moment we only backup the public transit
-    fmt = resource["metadata"].get("format").lower()
-    t = resource["dataset"].get("type")
-    return t == "public-transit" and fmt in ("gtfs", "netex")
-
-
 def _debug_name(resource) -> str:
-    return f'{resource["dataset"]["title"]} - {resource["metadata"]["title"]}'
+    return f'{resource["dataset"]["title"]} {resource["metadata"]["title"]} ({resource["metadata"]["url"]}) / {resource["dataset"]["id"]}'
 
 
 def _resource_title(resource) -> str:
@@ -95,189 +58,160 @@ def _download_resource(resource) -> Tuple[Path, str]:
     return (file_path, file_name)
 
 
-def _backup(resource, dataset_bucket):
-    logging.info(
-        f"backuping {_debug_name(resource)} (modified {resource['metadata']['updated']}"
-    )
-    # we use only ascii character for the title as cellar can be a tad strict
-    title = unidecode.unidecode(_resource_title(resource))
-
-    metadata = {
-        "url": resource["metadata"]["url"],
-        "title": title,
-        "start": resource["metadata"]["start_calendar_validity"],
-        "end": resource["metadata"]["end_calendar_validity"],
-        "format": resource["metadata"]["format"],
-    }
-    metadata = {k: v for (k, v) in metadata.items() if v is not None}
-
-    # we download the file
-    file_path, file_name = _download_resource(resource)
-
-    dataset_bucket.upload_file(
-        Filename=str(file_path.resolve()),
-        Key=file_name,
-        ExtraArgs={"Metadata": metadata, "ACL": "public-read"},
-    )
-
-    # for o in _get_already_backuped_resources(resource, dataset_bucket):
-    #     logging.info(
-    #         f"resources in dataset bucket: {o.key} ({o.last_modified} -- size = {o.size} -- etag = {o.e_tag})"
-    #     )
-
-    # we remove the file afterward
-    file_path.unlink()
-
-
-def _get_bucket_id(resource):
-    return f'dataset_{resource["dataset"]["datagouv_id"]}'
-
-
-def _make_s3_client(api_key, secret_key):
-    return boto3.resource(
-        "s3",
-        endpoint_url=CELLAR_URL,
-        aws_access_key_id=api_key,
-        aws_secret_access_key=secret_key,
-        config=botocore.client.Config(
-            s3={"addressing_style": "path"}, signature_version="s3"
-        ),
-    )
-
-
-@task()
-def check_etag(ctx):
-    """
-    backup all transport.data.gouv.fr resources to s3
-
-    Only resources that have changed are backuped
-    """
-    nb_resources = nb_resources_etag = 0
-    for r in _get_all_ressources():
-        if not _needs_to_be_backuped(r):
-            continue
-        nb_resources += 1
-        url = r["metadata"]["url"]
-        headers = _get_ressource_headers(url)
-
-        logging.info(f"-- {_debug_name(r)}")
-        etag = headers.get("ETag")
-        if etag is not None:
-            logging.info(etag)
-            nb_resources_etag += 1
-
-    logging.info(f"{nb_resources_etag} / {nb_resources} with etag")
-
-
 @task(default=True)
-def backup_resources(ctx, api_key, secret_key=None):
+def check_fares(ctx):
     """
-    backup all transport.data.gouv.fr resources to s3
-
-    Only resources that have changed are backuped
+    check if there are some fares in the GTFS
     """
-    nb_backuped_resources = nb_resources = nb_resources_to_backup = 0
-    s3_client = _make_s3_client(api_key, secret_key)
     for r in _get_all_ressources():
-        nb_resources += 1
-        if not _needs_to_be_backuped(r):
-            logging.debug(f"we don't need to backup {_debug_name(r)}")
+        # To speed up after first run
+        if r["dataset"]["id"] not in [
+            "5af03701b595081c1880a8a4",
+            "5c9399f88b4c412a8b9315a8",
+            "5c58758e8b4c415736c013a0",
+            "5b4f299cc751df452b86361b",
+            "5b4f299cc751df452b86361b",
+            "5d1081696f444106b5aae5c7",
+            "5c07a0588b4c41679e1c31f4",
+            "5b873d7206e3e76e5b2ffd32",
+            "5b873d7206e3e76e5b2ffd32",
+            "588a238d88ee3846659b81a4",
+            "5c07d931634f41746c7027d5",
+            "5bec4c588b4c4165a5e3d43d",
+            "5cebffba8b4c416359b36ef0",
+            "5d4d41ba634f416d75efd449",
+            "5d23ab778b4c416e54538a06",
+            "5bc59247634f417c808580b3",
+            "580a574aa3a7292dcfa9d1da",
+            "580a574aa3a7292dcfa9d1da",
+        ]:
             continue
-
-        dataset_bucket = s3_client.Bucket(_get_bucket_id(r))
-
-        # if nb_resources_to_backup >= 10:
-        #     logging.warn("too many backuped files for a POC, we stop")
-        #     return
-
-        dataset_bucket.create()
-        nb_resources_to_backup += 1
-
-        if not _needs_to_be_updated(r, dataset_bucket):
-            logging.debug(f"skipping {_debug_name(r)}, it does not need to be updated")
+        if r["metadata"]["format"] != "GTFS":
             continue
+        path, fname = _download_resource(r)
 
-        nb_backuped_resources += 1
-        _backup(r, dataset_bucket)
+        try:
+            with zipfile.ZipFile(path, "r") as zipf:
+                # print(f"files = {zipf.filelist}")
+                for f in zipf.filelist:
 
-    logging.info(
-        f"{nb_backuped_resources} resources backuped / {nb_resources_to_backup} (and {nb_resources} total resources)"
-    )
-    # cleanup removed ressource ?
-    # handle max history ?
+                    if "fare" in f.filename:
+                        print(f" ***********  {f.filename} dans {_debug_name(r)}")
+                        data = zipf.read(f)
 
+                        nb_line = len(data.decode("utf-8").split("\n"))
+                        print(f"{nb_line} ==> {data}")
 
-@task()
-def list_resources(ctx, api_key, secret_key=None):
-    """
-    List all backuped ressources
-    """
-    s3_client = _make_s3_client(api_key, secret_key)
+        except zipfile.BadZipFile as e:
+            # print(f"error: {e} for {_debug_name(r)}")
+            pass
 
-    for b in s3_client.buckets.all():
-        logging.info(f"* bucket {b.name}")
-
-        for o in b.objects.all():
-            logging.info(
-                f"  - {o.key} ({o.last_modified} -- size = {o.size} -- etag = {o.e_tag}) -- metadata = {o.Object().metadata})"
-            )
+        path.unlink()
 
 
 @task()
-def delete_all_resources(ctx, api_key, secret_key=None):
-    """
-    List all backuped ressources
-    """
-    s3_client = _make_s3_client(api_key, secret_key)
+def print_datasets(ctx):
+    import csv
 
-    for b in s3_client.buckets.all():
-        logging.info(f"* bucket {b.name}")
+    with open("datasets.csv", "w", newline="") as csvfile:
+        fieldnames = [
+            "id",
+            "type",
+            "url",
+            "titre",
+            "couverture geographique",
+            "type couverture geo",
+            "réseaux",
+        ]
+        writer = csv.DictWriter(csvfile)
 
-        for o in b.objects.all():
-            logging.info(
-                f"  - {o.key} ({o.last_modified} -- size = {o.size} -- etag = {o.e_tag}) -- metadata = {o.Object().metadata})"
-            )
-            o.delete()
-        b.delete()
+        writer.writerow(fieldnames)
 
-
-@task()
-def delete_duplicates(ctx, api_key, secret_key=None):
-    """
-    delete duplicates (usefull if new object with more metadata have been added)
-    """
-    s3_client = _make_s3_client(api_key, secret_key)
-
-    for b in s3_client.buckets.all():
-        logging.info(f"* bucket {b.name}")
-
-        duplicates = collections.defaultdict(list)
-        for o in b.objects.all():
-            duplicate_key = (
-                o.Object().metadata["title"],
-                o.Object().metadata.get("content-hash"),
-            )
-
-            duplicates[duplicate_key].append(o)
-
-        for k, v in duplicates.items():
-            if len(v) <= 1:
-                continue
-
-            last_modified = max(v, key=lambda o: o.last_modified)
-            logging.info(f"duplicate for {k}, last_modified: {last_modified}")
-            for o in v:
-                if o != last_modified:
-                    logging.info(f"delete old duplicate: {o}")
-                    o.delete()
+        for d in _get_all_datasets():
+            lieu = d["covered_area"]["name"]
+            type_couv = d["covered_area"]["type"]
+            networks = []
+            for r in d.get("resources", []):
+                networks.extend(r["networks"] or [])
+            l = [
+                d["id"],
+                d["type"],
+                f"https://transport.data.gouv.fr/datasets/{d['id']}",
+                d["title"],
+                lieu,
+                type_couv,
+            ]
+            l.extend(set(networks))
+            writer.writerow(l)
 
 
 @task()
-def delete_one_resources(ctx, api_key, secret_key, bucket, obj_key):
-    """
-    List all backuped ressources
-    """
-    s3_client = _make_s3_client(api_key, secret_key)
+def use_stats(ctx):
+    import csv
 
-    o = s3_client.Object(bucket, obj_key)
-    o.delete()
+    resources = [r for r in _get_all_ressources()]
+    # transport_resources_by_dataset_and_title = {(r["dataset"]["datagouv_id"], r["metadata"]["title"]): r["metadata"] for r in resources}
+    transport_datasets = {d["datagouv_id"]: d for d in _get_all_datasets()}
+
+    nb_not_found = 0
+    added_dataset = set()
+
+    with open("res_2019.csv", "w") as output_file:
+
+        # with open("./test_limit_use.csv", "r") as stat_transport_file:
+        with open("./stat_transport_2019.csv", "r") as stat_transport_file:
+            stat_transport = csv.DictReader(stat_transport_file)
+            fieldnames = stat_transport.fieldnames + [
+                "dataset.id",
+                "dataset.title",
+                "dataset.slug",
+                "dataset.url",
+                "dataset.organization",
+                "dataset.type",
+                # "resource.title",
+                # "resource.format"
+            ]
+            writer = csv.DictWriter(output_file, fieldnames=fieldnames)
+
+            writer.writeheader()
+
+            use_by_url = {s["Méta-données: url"]: s for s in stat_transport}
+
+            with open(
+                # "./test.csv", "r"
+                "./datagouv_resources_20200613.csv",
+                "r",
+            ) as datagouv_resources_file:
+                datagouv_resources = csv.DictReader(
+                    datagouv_resources_file, delimiter=";"
+                )
+
+                for dr in datagouv_resources:
+                    dataset_id = dr["dataset.id"]
+                    if dataset_id in added_dataset:
+                        continue
+                    url = dr["url"]
+
+                    tr = use_by_url.get(url)
+                    if tr is not None:
+                        added_dataset.add(dataset_id)
+                        # print(f"found a transport for {url}")
+
+                        transport_dset = transport_datasets.get(dr["dataset.id"])
+                        if transport_dset is not None:
+                            new_line = {
+                                "dataset.id": dr["dataset.id"],
+                                "dataset.title": dr["dataset.title"],
+                                "dataset.slug": dr["dataset.slug"],
+                                "dataset.url": dr["dataset.url"],
+                                "dataset.organization": dr["dataset.organization"],
+                                "dataset.type": transport_dset["type"],
+                                # "resource.title": dr["title"],
+                                **tr,
+                            }
+                            writer.writerow(new_line)
+                        else:
+                            nb_not_found += 1
+                        # print("{}".format(new_line))
+
+    # print(f"nb resources not found = {nb_not_found}")
